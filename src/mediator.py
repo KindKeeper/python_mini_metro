@@ -45,7 +45,7 @@ class Mediator:
         pygame.font.init()
 
         # configs
-        self.passenger_spawning_step = passenger_spawning_start_step
+        self.passenger_spawning_start_step = passenger_spawning_start_step
         self.passenger_spawning_interval_step = passenger_spawning_interval_step
         self.num_paths = num_paths
         self.num_metros = num_metros
@@ -67,6 +67,9 @@ class Mediator:
             color = hue_to_rgb(i / (num_paths + 1))
             self.path_colors[color] = False  # not taken
         self.path_to_color: Dict[Path, Color] = {}
+
+        # Track current path being edited
+        self.current_path: Path | None = None
 
         # status
         self.time_ms = 0
@@ -108,9 +111,8 @@ class Mediator:
 
         if event.event_type == MouseEventType.MOUSE_DOWN:
             self.is_mouse_down = True
-            if entity:
-                if isinstance(entity, Station):
-                    self.start_path_on_station(entity)
+            if entity and isinstance(entity, Station):
+                self.start_path_on_station(entity)
 
         elif event.event_type == MouseEventType.MOUSE_UP:
             self.is_mouse_down = False
@@ -121,9 +123,8 @@ class Mediator:
                 else:
                     self.abort_path_creation()
             else:
-                if entity and isinstance(entity, PathButton):
-                    if entity.path:
-                        self.remove_path(entity.path)
+                if entity and isinstance(entity, PathButton) and entity.path is not None:
+                    self.remove_path(entity.path)
 
         elif event.event_type == MouseEventType.MOUSE_MOTION:
             if self.is_mouse_down:
@@ -140,9 +141,8 @@ class Mediator:
                         button.on_exit()
 
     def react_keyboard_event(self, event: KeyboardEvent):
-        if event.event_type == KeyboardEventType.KEY_UP:
-            if event.key == pygame.K_SPACE:
-                self.is_paused = not self.is_paused
+        if event.event_type == KeyboardEventType.KEY_UP and event.key == pygame.K_SPACE:
+            self.is_paused = not self.is_paused
 
     def react(self, event: Event | None):
         if isinstance(event, MouseEvent):
@@ -151,12 +151,13 @@ class Mediator:
             self.react_keyboard_event(event)
 
     def get_containing_entity(self, position: Point):
-        for station in self.stations:
-            if station.contains(position):
-                return station
+        # Check UI elements first (buttons), then stations
         for button in self.buttons:
             if button.contains(position):
                 return button
+        for station in self.stations:
+            if station.contains(position):
+                return station
 
     def remove_path(self, path: Path):
         self.path_to_button[path].remove_path()
@@ -184,18 +185,19 @@ class Mediator:
             path.is_being_created = True
             self.path_being_created = path
             self.paths.append(path)
+            self.current_path = path
 
     def add_station_to_path(self, station: Station) -> None:
         assert self.path_being_created is not None
         if self.path_being_created.stations[-1] == station:
             return
-        # loop
+        # Check for loop
         if (
             len(self.path_being_created.stations) > 1
             and self.path_being_created.stations[0] == station
         ):
             self.path_being_created.set_loop()
-        # non-loop
+        # Non-loop path
         elif self.path_being_created.stations[0] != station:
             if self.path_being_created.is_looped:
                 self.path_being_created.remove_loop()
@@ -207,6 +209,7 @@ class Mediator:
         self.release_color_for_path(self.path_being_created)
         self.paths.remove(self.path_being_created)
         self.path_being_created = None
+        self.current_path = None
 
     def release_color_for_path(self, path: Path) -> None:
         self.path_colors[path.color] = False
@@ -222,24 +225,25 @@ class Mediator:
             self.path_being_created.add_metro(metro)
             self.metros.append(metro)
         self.path_being_created = None
+        self.current_path = None
         self.assign_paths_to_buttons()
 
     def end_path_on_station(self, station: Station) -> None:
         assert self.path_being_created is not None
-        # current station de-dupe
+        # Skip duplicate station
         if (
             len(self.path_being_created.stations) > 1
             and self.path_being_created.stations[-1] == station
         ):
             self.finish_path_creation()
-        # loop
+        # Handle loop
         elif (
             len(self.path_being_created.stations) > 1
             and self.path_being_created.stations[0] == station
         ):
             self.path_being_created.set_loop()
             self.finish_path_creation()
-        # non-loop
+        # Add station to non-loop path
         elif self.path_being_created.stations[0] != station:
             self.path_being_created.add_station(station)
             self.finish_path_creation()
@@ -255,7 +259,7 @@ class Mediator:
 
     def is_passenger_spawn_time(self) -> bool:
         return (
-            self.steps == self.passenger_spawning_step
+            self.steps == self.passenger_spawning_start_step
             or self.steps_since_last_spawn == self.passenger_spawning_interval_step
         )
 
@@ -265,6 +269,9 @@ class Mediator:
             other_station_shape_types = [
                 x for x in station_types if x != station.shape.type
             ]
+            # Fix: Check if other_station_shape_types is empty
+            if not other_station_shape_types:
+                continue
             destination_shape_type = random.choice(other_station_shape_types)
             destination_shape = get_shape_from_type(
                 destination_shape_type, passenger_color, passenger_size
@@ -303,7 +310,7 @@ class Mediator:
                 passengers_from_metro_to_station = []
                 passengers_from_station_to_metro = []
 
-                # queue
+                # Queue passengers for removal or transfer
                 for passenger in metro.passengers:
                     if (
                         metro.current_station.shape.type
@@ -318,11 +325,11 @@ class Mediator:
                 for passenger in metro.current_station.passengers:
                     if (
                         self.travel_plans[passenger].next_path
-                        and self.travel_plans[passenger].next_path.id == metro.path_id  # type: ignore
+                        and self.travel_plans[passenger].next_path.id == metro.path_id
                     ):
                         passengers_from_station_to_metro.append(passenger)
 
-                # process
+                # Process removals
                 for passenger in passengers_to_remove:
                     passenger.is_at_destination = True
                     metro.remove_passenger(passenger)
@@ -330,6 +337,7 @@ class Mediator:
                     del self.travel_plans[passenger]
                     self.score += 1
 
+                # Process transfers from metro to station
                 for passenger in passengers_from_metro_to_station:
                     if metro.current_station.has_room():
                         metro.move_passenger(passenger, metro.current_station)
@@ -338,6 +346,7 @@ class Mediator:
                             passenger, metro.current_station
                         )
 
+                # Process transfers from station to metro
                 for passenger in passengers_from_station_to_metro:
                     if metro.has_room():
                         metro.current_station.move_passenger(passenger, metro)
@@ -348,13 +357,17 @@ class Mediator:
             if station.shape.type == shape_type:
                 stations.append(station)
         random.shuffle(stations)
-
         return stations
 
     def find_shared_path(self, station_a: Station, station_b: Station) -> Path | None:
+        # Priority: Current path being edited
+        if self.current_path is not None:
+            if station_a in self.current_path.stations and station_b in self.current_path.stations:
+                return self.current_path
+        
+        # Fallback: Check all paths
         for path in self.paths:
-            stations = path.stations
-            if (station_a in stations) and (station_b in stations):
+            if station_a in path.stations and station_b in path.stations:
                 return path
         return None
 
@@ -376,24 +389,26 @@ class Mediator:
         assert len(node_path) >= 2
         if len(node_path) == 2:
             return node_path
-        else:
-            nodes_to_remove = []
-            i = 0
-            j = 1
-            path_set_list = [x.paths for x in node_path]
-            path_set_list.append(set())
-            while j <= len(path_set_list) - 1:
-                set_a = path_set_list[i]
-                set_b = path_set_list[j]
-                if set_a & set_b:
-                    j += 1
-                else:
-                    for k in range(i + 1, j - 1):
-                        nodes_to_remove.append(node_path[k])
-                    i = j - 1
-                    j += 1
-            for node in nodes_to_remove:
-                node_path.remove(node)
+        
+        nodes_to_remove = []
+        i = 0
+        j = 1
+        path_set_list = [x.paths for x in node_path]
+        path_set_list.append(set())
+        
+        while j <= len(path_set_list) - 1:
+            set_a = path_set_list[i]
+            set_b = path_set_list[j]
+            if set_a & set_b:
+                j += 1
+            else:
+                for k in range(i + 1, j - 1):
+                    nodes_to_remove.append(node_path[k])
+                i = j - 1
+                j += 1
+        
+        for node in nodes_to_remove:
+            node_path.remove(node)
         return node_path
 
     def find_travel_plan_for_passengers(self) -> None:
@@ -409,14 +424,10 @@ class Mediator:
                         start = station_nodes_dict[station]
                         end = station_nodes_dict[possible_dst_station]
                         node_path = bfs(start, end)
+                        
+                        # Fix: Skip invalid path (len(node_path) == 1)
                         if len(node_path) == 1:
-                            # passenger arrived at destination
-                            station.remove_passenger(passenger)
-                            self.passengers.remove(passenger)
-                            passenger.is_at_destination = True
-                            del self.travel_plans[passenger]
-                            should_set_null_path = False
-                            break
+                            continue
                         elif len(node_path) > 1:
                             node_path = self.skip_stations_on_same_path(node_path)
                             self.travel_plans[passenger] = TravelPlan(node_path[1:])
@@ -425,5 +436,6 @@ class Mediator:
                             )
                             should_set_null_path = False
                             break
+                    
                     if should_set_null_path:
                         self.travel_plans[passenger] = TravelPlan([])
